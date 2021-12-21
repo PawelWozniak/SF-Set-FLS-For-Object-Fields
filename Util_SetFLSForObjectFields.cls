@@ -1,194 +1,232 @@
-/* To easily call this as an execute anonymous scripts remove the method signature and brackets and set these variables as desired.
-list<string> sObjects = new list<string>{'account','object2__c'};
-list<string> profileNames = new list<string>{'System Administrator','Standard User'};
-boolean canView; //set to true or false
-boolean canEdit; //set to true or false
-boolean doUpdate = false;
-list<string> emailRecips = new list<string>{'your_email_here@somewhere.com'};
-*/
+public with sharing class Util_SetFLSForObjectFields {
+
+	// Run this code block below as Anonymous Apex or call method:
+	// Util_SetFLSForObjectFields.grantAccessForSystemAdministrator();
+	public static void grantAccessForSystemAdministrator() {
+		List<String> sObjects = new List<String> {
+			'account', 'contact'
+		};
+		List<String> profileNames = new List<String> {
+			'System Administrator'
+		};
+		boolean canView = true;
+		boolean canEdit = true;
+		boolean doUpdate = true;
+		List<String> emailRecips = new List<String> {
+			'ext1324@foss.dk'
+		};
+		Util_SetFLSForObjectFields.setPermissionsOnObjects(sObjects, profileNames, canView, canEdit, doUpdate, emailRecips);
+	}
 
 /**
-*@Description sets the permissions on all fields of all given objects for all given profiles to the given true or false values for view and edit. Additionally can be set to 
-* rollback changes to only generate the report of what would be modified. Emails logs of proposed and completed changes to addresses specified. Only modififies permissions that
-  do not match the new settings so un-needed changes are not performed and could theoretically be called repeatedly to chip away at changes if the overall amount of DML ends up being
-  too much for one operation (chunking/limit logic does not currently exist so doing too many changes at once could cause errors).
-*@Param sObjects list of sObjects to set permissions for all fields on
-*@Param profileNames a list of names of profiles for which to modify the permissions for
-*@Param canView set the view permission to true or false for all fields on all provided objects for all provided profiles
-*@Param canEdit set the edit permission to true or false for all fields on all provided objects for all provided profiles
-*@Param doUpdate should the changes to field level security actually be performed or no? If not the reports for proposed changes and what the results would be are still generated
+ *@Description sets the permissions on all fields of all given objects for all given profiles to the given true or false values for view and edit. Additionally can be set to
+ * rollback changes to only generate the report of what would be modified. Emails logs of proposed and completed changes to addresses specified. Only modififies permissions that
+   do not match the new settings so un-needed changes are not performed and could theoretically be called repeatedly to chip away at changes if the overall amount of DML ends up being
+   too much for one operation (chunking/limit logic does not currently exist so doing too many changes at once could cause errors).
+ *@Param sObjects list of sObjects to set permissions for all fields on
+ *@Param profileNames a list of names of profiles for which to modify the permissions for
+ *@Param canView set the view permission to true or false for all fields on all provided objects for all provided profiles
+ *@Param canEdit set the edit permission to true or false for all fields on all provided objects for all provided profiles
+ *@Param doUpdate should the changes to field level security actually be performed or no? If not the reports for proposed changes and what the results would be are still generated
         and sent because a database.rollback is used to undo the changes.
-*@Param emailRecips a list of email addresses to send the results to. If in a sandbox ensure email deliverability is turned on to receive the reports.
-**/
-public static string setPermissionsOnObjects(list<string> sObjects, list<string> profileNames, boolean canView, boolean canEdit, boolean doUpdate, list<string> emailRecips){
-        
-    system.debug('\n\n\n----- Setting Permissions for profiles');
-    list<FieldPermissions> updatePermissions = new list<FieldPermissions>();
-    string csvUpdateString = 'Object Name, Field Name, Profile, Could Read?, Could Edit?, Can Read?, Can Edit, What Changed\n';
-    map<Id,Id> profileIdToPermSetIdMap = new map<Id,Id>();
-    map<Id,Id> permSetToProfileIdMap = new map<Id,Id>();
-    map<Id,String> profileIdToNameMap = new map<Id,String>();
+ *@Param emailRecips a list of email addresses to send the results to. If in a sandbox ensure email deliverability is turned on to receive the reports.
+ **/
+	public static String setPermissionsOnObjects(List<String> sObjects, List<String> profileNames, boolean canView, boolean canEdit, boolean doUpdate, List<String> emailRecips) {
 
-    //Every profile has an underlying permission set. We have to query for that permission set id to make a new field permission as 
-    //those are related to permission sets not profiles.
-    for(PermissionSet thisPermSet : [Select Id, IsOwnedByProfile, Label, Profile.Name from PermissionSet  where Profile.Name in :profileNames]){
-        profileIdToPermSetIdMap.put(thisPermSet.ProfileId,thisPermSet.Id);
-        permSetToProfileIdMap.put(thisPermSet.Id,thisPermSet.ProfileId);
-    }
+		System.debug('\n\n\n----- Setting Permissions for profiles');
+		List<FieldPermissions> updatePermissions = new List<FieldPermissions>();
+		String csvUpdateString = 'Object Name, Field Name, Profile, Could Read?, Could Edit?, Can Read?, Can Edit, What Changed\n';
+		Map<Id, Id> profileIdToPermSetIdMap = new Map<Id, Id>();
+		Map<Id, Id> permSetToProfileIdMap = new Map<Id, Id>();
+		Map<Id, String> profileIdToNameMap = new Map<Id, String>();
 
-    Map<String, Schema.SObjectType> globalDescribe = Schema.getGlobalDescribe();
-    Map<String,Profile> profilesMap = new Map<String,Profile>();
+		// Every profile has an underlying permission set. We have to query for that permission set id to make a new field permission as
+		// those are related to permission sets not profiles.
+		for (PermissionSet thisPermSet : [SELECT Id, IsOwnedByProfile, Label, Profile.Name FROM PermissionSet WHERE Profile.Name IN :profileNames]) {
+			profileIdToPermSetIdMap.put(thisPermSet.ProfileId, thisPermSet.Id);
+			permSetToProfileIdMap.put(thisPermSet.Id, thisPermSet.ProfileId);
+		}
 
-    //map of profile id to object type to field name to field permission
-    map<id,map<string,map<string,FieldPermissions>>> objectToFieldPermissionsMap = new map<id,map<string,map<string,FieldPermissions>>>();
+		Map<String, Schema.SObjectType> globalDescribe = Schema.getGlobalDescribe();
+		Map<String, Profile> profilesMap = new Map<String, Profile>();
 
-    for(Profile  thisProfile : [select name, id from Profile where name in :profileNames]){
-        profilesMap.put(thisProfile.Name,thisProfile);
-        profileIdToNameMap.put(thisProfile.Id,thisProfile.Name);
-    }
+		// map of profile id to object type to field name to field permission
+		Map<id, Map<String, Map<String, FieldPermissions>>> objectToFieldPermissionsMap = new Map<id, Map<String, Map<String, FieldPermissions>>>();
 
-    List<FieldPermissions> fpList = [SELECT SobjectType, 
-                                            Field, 
-                                            PermissionsRead, 
-                                            PermissionsEdit, 
-                                            Parent.ProfileId 
-                                    FROM FieldPermissions 
-                                    WHERE SobjectType IN :sObjects  and
-                                    Parent.Profile.Name IN :profileNames
-                                    ORDER By SobjectType];
+		for (Profile thisProfile : [SELECT name, Id FROM Profile WHERE name IN :profileNames]) {
+			profilesMap.put(thisProfile.Name, thisProfile);
+			profileIdToNameMap.put(thisProfile.Id, thisProfile.Name);
+		}
 
-    for(FieldPermissions thisPerm : fpList){
-        //gets map of object types to fields to permission sets for this permission sets profile
-        map<string,map<string,FieldPermissions>> profilePerms = objectToFieldPermissionsMap.containsKey(thisPerm.parent.profileId) ?
-                                                                objectToFieldPermissionsMap.get(thisPerm.parent.profileId) :
-                                                                new map<string,map<string,FieldPermissions>>();
-        //gets map of field names for this object to permissions
-        map<string,FieldPermissions> objectPerms = profilePerms.containsKey(thisPerm.sObjectType) ?
-                                                   profilePerms.get(thisPerm.sObjectType) :
-                                                   new map<string,FieldPermissions>();
+		List<FieldPermissions> fpList = [SELECT SobjectType, Field, PermissionsRead, PermissionsEdit, Parent.ProfileId
+										 FROM FieldPermissions
+										 WHERE SobjectType IN :sObjects
+										 AND Parent.Profile.Name IN :profileNames
+										 ORDER BY SobjectType];
 
-        //puts this field and its permission into the object permission map
-        objectPerms.put(thisPerm.Field,thisPerm);
+		for (FieldPermissions thisPerm : fpList) {
+			// gets map of object types to fields to permission sets for this permission sets profile
+			Map<String, Map<String, FieldPermissions>> profilePerms = objectToFieldPermissionsMap.containsKey(thisPerm.parent.profileId) ?
+																	  objectToFieldPermissionsMap.get(thisPerm.parent.profileId) :
+																	  new Map<String, Map<String, FieldPermissions>>();
+			// gets map of field names for this object to permissions
+			Map<String, FieldPermissions> objectPerms = profilePerms.containsKey(thisPerm.sObjectType) ?
+														profilePerms.get(thisPerm.sObjectType) :
+														new Map<String, FieldPermissions>();
 
-        //puts this object permission map into the object permissions map
-        profilePerms.put(thisPerm.sObjectType,objectPerms);
+			// puts this field and its permission into the object permission map
+			objectPerms.put(thisPerm.Field, thisPerm);
 
-        //write profile permissions back to profile permissions map
-        objectToFieldPermissionsMap.put(thisPerm.parent.profileId,profilePerms);
-    }
-    system.debug('\n\n\n----- Built Object Permission Map');
-    system.debug(objectToFieldPermissionsMap);
+			// puts this object permission map into the object permissions map
+			profilePerms.put(thisPerm.sObjectType, objectPerms);
 
-    for(string thisObject : sObjects){
+			// write profile permissions back to profile permissions map
+			objectToFieldPermissionsMap.put(thisPerm.parent.profileId, profilePerms);
+		}
 
-        system.debug('\n\n\n------ Setting permissions for ' + thisObject);
-        Map<String, Schema.SObjectField> objectFields = globalDescribe.get(thisObject).getDescribe().fields.getMap();
+		System.debug('\n\n\n----- Built Object Permission Map');
+		System.debug(objectToFieldPermissionsMap);
 
-        for(string thisProfile : profileNames){
+		for (String thisObject : sObjects) {
 
-            Id profileId = profilesMap.get(thisProfile).Id;
+			System.debug('\n\n\n------ Setting permissions for ' + thisObject);
+			Map<String, Schema.SObjectField> objectFields = globalDescribe.get(thisObject).getDescribe().fields.getMap();
 
-            //gets map of object types to fields to permission sets for this permission sets profile
-            map<string,map<string,FieldPermissions>> profilePerms = objectToFieldPermissionsMap.containsKey(profileId) ?
-            objectToFieldPermissionsMap.get(profileId) :
-            new map<string,map<string,FieldPermissions>>();            
+			for (String thisProfile : profileNames) {
 
-            //gets map of field names for this object to permissions
-            map<string,FieldPermissions> objectPerms = profilePerms.containsKey(thisObject) ?
-            profilePerms.get(thisObject) :
-            new map<string,FieldPermissions>();
+				Id profileId = profilesMap.get(thisProfile).Id;
 
-            system.debug('\n\n\n---- Setting permissions for profile: ' + thisProfile);
-            
-            Id permissionSetId = profileIdToPermSetIdMap.get(profileId);
-            for(Schema.SObjectField thisField : objectFields.values()){
-                string fieldName = thisField.getDescribe().getName();
-                boolean canPermission = thisField.getDescribe().isPermissionable();
+				// gets map of object types to fields to permission sets for this permission sets profile
+				Map<String, Map<String, FieldPermissions>> profilePerms = objectToFieldPermissionsMap.containsKey(profileId) ?
+																		  objectToFieldPermissionsMap.get(profileId) :
+																		  new Map<String, Map<String, FieldPermissions>>();
 
-                if(!canPermission) {
-                    system.debug('\n\n\n---- Cannot change permissions for field: ' + thisField + '. Skipping');
-                    continue;
-                }
+				// gets map of field names for this object to permissions
+				Map<String, FieldPermissions> objectPerms = profilePerms.containsKey(thisObject) ?
+															profilePerms.get(thisObject) :
+															new Map<String, FieldPermissions>();
 
-                string fieldObjectName = thisObject+'.'+fieldName;
-                FieldPermissions thisPermission = objectPerms.containsKey(fieldObjectName) ?
-                                                  objectPerms.get(fieldObjectName) :
-                                                  new FieldPermissions(Field=fieldObjectName,
-                                                                       SobjectType=thisObject,
-                                                                       ParentId=permissionSetId);
+				System.debug('\n\n\n---- Setting permissions for profile: ' + thisProfile);
 
-                if(thisPermission.PermissionsRead != canView || thisPermission.PermissionsEdit != canEdit){      
-                    system.debug('------------------- Adjusting Permission for field: ' + fieldName); 
-                    
-                    csvUpdateString += thisObject+','+fieldName+','+thisProfile+','+thisPermission.PermissionsRead+','+thisPermission.PermissionsEdit+','+canView+','+canEdit+',';
+				Id permissionSetId = profileIdToPermSetIdMap.get(profileId);
 
-                    if(thisPermission.PermissionsRead != canView) csvUpdateString += 'Read Access ';
-                    if(thisPermission.PermissionsEdit != canEdit) csvUpdateString += 'Edit Access ';
-                    csvUpdateString+='\n';
+				for (Schema.SObjectField thisField : objectFields.values()) {
+					String fieldName = thisField.getDescribe().getName();
+					boolean canPermission = thisField.getDescribe().isPermissionable();
 
-                    thisPermission.PermissionsRead = canView;
-                    thisPermission.PermissionsEdit = canEdit;
-                    updatePermissions.add(thisPermission);
-                }
-            }
-        }
-    }
+					if (!canPermission) {
+						System.debug('\n\n\n---- Cannot change permissions for field: ' + thisField + '. Skipping');
+						continue;
+					}
 
-    system.debug('\n\n\n----- Ready to update ' + updatePermissions.size() + ' permissions');
+					String fieldObjectName = thisObject + '.' + fieldName;
+					FieldPermissions thisPermission = objectPerms.containsKey(fieldObjectName) ?
+													  objectPerms.get(fieldObjectName) :
+													  new FieldPermissions(Field = fieldObjectName,
+																		   SobjectType = thisObject,
+																		   ParentId = permissionSetId);
 
-    Savepoint sp = Database.setSavepoint();
+					if (thisPermission.PermissionsRead != canView || thisPermission.PermissionsEdit != canEdit) {
+						System.debug('------------------- Adjusting Permission for field: ' + fieldName);
 
-    string upsertResults = 'Object Name, Field Name, Permission Set Id, Profile Name, Message\n';
+						csvUpdateString += thisObject + ',' + fieldName + ',' + thisProfile + ',' + thisPermission.PermissionsRead + ',' + thisPermission.PermissionsEdit + ',' + canView + ',' + canEdit + ',';
 
-    Database.UpsertResult[] results = Database.upsert(updatePermissions, false);
+						if (thisPermission.PermissionsRead != canView) csvUpdateString += 'Read Access ';
 
-    for(Integer index = 0, size = results.size(); index < size; index++) {
-        FieldPermissions thisObj = updatePermissions[index];
+						if (thisPermission.PermissionsEdit != canEdit) csvUpdateString += 'Edit Access ';
 
-        string thisProfileName = profileIdToNameMap.get(permSetToProfileIdMap.get(thisObj.ParentId));
-        if(results[index].isSuccess()) {
-            if(results[index].isCreated()) {
-                upsertResults += thisObj.sObjectType +',' + thisObj.Field +','+ thisObj.ParentId +',' +thisProfileName+',permission was created\n';
-            } else {
-                upsertResults += thisObj.sObjectType +',' + thisObj.Field +','+ thisObj.ParentId +',' +thisProfileName+',permission was edited\n';
-            }
-        }
-        else {
-            upsertResults +=thisObj.sObjectType +',' + thisObj.Field + ','+ thisObj.ParentId +',' +thisProfileName+'ERROR: '+results[index].getErrors()[0].getMessage()+'\n';                
-        }
-    }
-    if(!doUpdate) Database.rollback(sp);
+						csvUpdateString += '\n';
 
-    system.debug('\n\n\n------- Update Results');
-    system.debug(upsertResults);
+						thisPermission.PermissionsRead = canView;
+						thisPermission.PermissionsEdit = canEdit;
+						updatePermissions.add(thisPermission);
+					}
+				}
+			}
+		}
 
-    Messaging.SingleEmailMessage email = new Messaging.SingleEmailMessage();
-    email.setToAddresses(emailRecips);    
-    email.setSubject('Object Security Update Result');
+		System.debug('\n\n\n----- Ready to update ' + updatePermissions.size() + ' permissions');
+
+		Savepoint sp = Database.setSavepoint();
+
+		String upsertResults = 'Object Name, Field Name, Permission Set Id, Profile Name, Message\n';
+
+		Database.UpsertResult[] results = Database.upsert(updatePermissions, false);
+
+		for (Integer index = 0, size = results.size(); index < size; index++) {
+			FieldPermissions thisObj = updatePermissions[index];
+
+			String thisProfileName = profileIdToNameMap.get(permSetToProfileIdMap.get(thisObj.ParentId));
+
+			if (results[index].isSuccess()) {
+				if (results[index].isCreated()) {
+					upsertResults += thisObj.sObjectType + ',' + thisObj.Field + ',' + thisObj.ParentId + ',' + thisProfileName + ',permission was created\n';
+				} else {
+					upsertResults += thisObj.sObjectType + ',' + thisObj.Field + ',' + thisObj.ParentId + ',' + thisProfileName + ',permission was edited\n';
+				}
+			}
+			else {
+				upsertResults += thisObj.sObjectType + ',' + thisObj.Field + ',' + thisObj.ParentId + ',' + thisProfileName + 'ERROR: ' + results[index].getErrors()[0].getMessage() + '\n';
+			}
+		}
+
+		if (!doUpdate) Database.rollback(sp);
+
+		// System.debug('\n\n\n------- Update Results');
+		// System.debug(upsertResults);
+
+		ID jobID = System.enqueueJob(new sendEmailAsync(csvUpdateString, emailRecips, sObjects, profileNames, upsertResults));
+
+		return csvUpdateString;
+	}
+
+	public class sendEmailAsync implements Queueable {
+		String csvUpdateString;
+		List<String> emailRecips;
+		List<String> sObjects;
+		List<String> profileNames;
+		String upsertResults;
+
+		sendEmailAsync(String csvUpdateString, List<String> emailRecips, List<String> sObjects, List<String> profileNames, String upsertResults ) {
+			this.csvUpdateString = csvUpdateString;
+			this.emailRecips = emailRecips;
+			this.sObjects = sObjects;
+			this.profileNames = profileNames;
+			this.upsertResults = upsertResults;
+		}
+
+		public void execute(QueueableContext context) {
+			Messaging.SingleEmailMessage emailMessage = new Messaging.SingleEmailMessage();
+			emailMessage.setToAddresses(emailRecips);
+			emailMessage.setSubject('Object Security Update Result');
+
+			String emailBody = 'Updated permissions for objects: ' + sObjects + '\n\n';
+			emailBody += 'For profiles: ' + profileNames + '\n\n';
+			emailBody += 'See attachemnts for details';
+			// emailBody += 'CSV Update Plan:\n\n\n\n';
+			// emailBody += csvUpdateString;
+			// emailBody += '\n\n\n\n';
+			// emailBody += 'CSV Update Results: \n\n\n\n';
+			// emailBody += upsertResults;
+
+			emailMessage.setPlainTextBody(emailBody);
+
+			List<Messaging.EmailFileAttachment> attachments = new List<Messaging.EmailFileAttachment>();
+			Messaging.EmailFileAttachment efa = new Messaging.EmailFileAttachment();
+			efa.setFileName('Update Plan.csv');
+			efa.setBody(blob.valueOf(csvUpdateString));
+			attachments.add(efa);
+
+			Messaging.EmailFileAttachment efa1 = new Messaging.EmailFileAttachment();
+			efa1.setFileName('Update Results.csv');
+			efa1.setBody(blob.valueOf(upsertResults));
+			attachments.add(efa1);
+
+			emailMessage.setFileAttachments(attachments);
+
+			Messaging.sendEmail(new Messaging.SingleEmailMessage[] { emailMessage });
+		}
+
+	}
     
-    string emailBody = 'Updated permissions for objects: ' + sObjects + '\n\n';
-    emailBody += 'For profiles: ' + profileNames+'\n\n';
-    emailBody += 'CSV Update Plan:\n\n\n\n';
-    emailBody += csvUpdateString;
-    emailBody += '\n\n\n\n';
-    emailBody += 'CSV Update Results: \n\n\n\n';
-    emailBody += upsertResults;
-
-    email.setPlainTextBody(emailBody);
-
-    list<Messaging.EmailFileAttachment> attachments = new list<Messaging.EmailFileAttachment>();
-    Messaging.EmailFileAttachment efa = new Messaging.EmailFileAttachment();
-    efa.setFileName('Update Plan.csv');
-    efa.setBody(blob.valueOf(csvUpdateString));
-    attachments.add(efa);
-
-    Messaging.EmailFileAttachment efa1 = new Messaging.EmailFileAttachment();
-    efa1.setFileName('Update Results.csv');
-    efa1.setBody(blob.valueOf(upsertResults));
-    attachments.add(efa1);
-
-    email.setFileAttachments(attachments);
-    Messaging.sendEmail(new Messaging.SingleEmailMessage[] { email });
-
-
-    return csvUpdateString;
+}
