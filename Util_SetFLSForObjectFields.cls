@@ -11,7 +11,7 @@ public with sharing class Util_SetFLSForObjectFields {
 		};
 		boolean canView = true;
 		boolean canEdit = true;
-		boolean doUpdate = true;
+		boolean doUpdate = false;
 		List<String> emailRecips = new List<String> {
 			'ext1324@foss.dk'
 		};
@@ -30,12 +30,14 @@ public with sharing class Util_SetFLSForObjectFields {
  *@Param doUpdate should the changes to field level security actually be performed or no? If not the reports for proposed changes and what the results would be are still generated
         and sent because a database.rollback is used to undo the changes.
  *@Param emailRecips a list of email addresses to send the results to. If in a sandbox ensure email deliverability is turned on to receive the reports.
+ *@see https://iwritecrappycode.wordpress.com/2021/12/16/bulk-set-field-level-security-on-objects-for-profiles/
  **/
 	public static String setPermissionsOnObjects(List<String> sObjects, List<String> profileNames, boolean canView, boolean canEdit, boolean doUpdate, List<String> emailRecips) {
+		String csvSep = ',';
 
 		System.debug('\n\n\n----- Setting Permissions for profiles');
 		List<FieldPermissions> updatePermissions = new List<FieldPermissions>();
-		String csvUpdateString = 'Object Name, Field Name, Profile, Could Read?, Could Edit?, Can Read?, Can Edit, What Changed\n';
+		String csvUpdateString = 'Object Name, Field Name, Field Type, Profile, Could Read?, Could Edit?, Can Read, Can Edit, What Changed\n';
 		Map<Id, Id> profileIdToPermSetIdMap = new Map<Id, Id>();
 		Map<Id, Id> permSetToProfileIdMap = new Map<Id, Id>();
 		Map<Id, String> profileIdToNameMap = new Map<Id, String>();
@@ -51,17 +53,17 @@ public with sharing class Util_SetFLSForObjectFields {
 		Map<String, Profile> profilesMap = new Map<String, Profile>();
 
 		// map of profile id to object type to field name to field permission
-		Map<id, Map<String, Map<String, FieldPermissions>>> objectToFieldPermissionsMap = new Map<id, Map<String, Map<String, FieldPermissions>>>();
+		Map<Id, Map<String, Map<String, FieldPermissions>>> objectToFieldPermissionsMap = new Map<Id, Map<String, Map<String, FieldPermissions>>>();
 
-		for (Profile thisProfile : [SELECT name, Id FROM Profile WHERE name IN :profileNames]) {
+		for (Profile thisProfile : [SELECT Name, Id FROM Profile WHERE Name IN :profileNames]) {
 			profilesMap.put(thisProfile.Name, thisProfile);
 			profileIdToNameMap.put(thisProfile.Id, thisProfile.Name);
 		}
 
 		List<FieldPermissions> fpList = [SELECT SobjectType, Field, PermissionsRead, PermissionsEdit, Parent.ProfileId
 										 FROM FieldPermissions
-										 WHERE SobjectType IN :sObjects
-										 AND Parent.Profile.Name IN :profileNames
+										 WHERE SobjectType IN : sObjects
+										 AND Parent.Profile.Name IN : profileNames
 										 ORDER BY SobjectType];
 
 		for (FieldPermissions thisPerm : fpList) {
@@ -85,7 +87,7 @@ public with sharing class Util_SetFLSForObjectFields {
 		}
 
 		System.debug('\n\n\n----- Built Object Permission Map');
-		System.debug(objectToFieldPermissionsMap);
+		// System.debug(objectToFieldPermissionsMap);
 
 		for (String thisObject : sObjects) {
 
@@ -112,11 +114,17 @@ public with sharing class Util_SetFLSForObjectFields {
 
 				for (Schema.SObjectField thisField : objectFields.values()) {
 					String fieldName = thisField.getDescribe().getName();
+					String fieldType = thisField.getDescribe().getType().name();
+					Boolean isFormula = thisField.getDescribe().isCalculated();
 					boolean canPermission = thisField.getDescribe().isPermissionable();
 
 					if (!canPermission) {
 						System.debug('\n\n\n---- Cannot change permissions for field: ' + thisField + '. Skipping');
 						continue;
+					}
+
+					if (isFormula) {
+						fieldType = 'Formula(' + fieldType + ')';
 					}
 
 					String fieldObjectName = thisObject + '.' + fieldName;
@@ -129,16 +137,34 @@ public with sharing class Util_SetFLSForObjectFields {
 					if (thisPermission.PermissionsRead != canView || thisPermission.PermissionsEdit != canEdit) {
 						System.debug('------------------- Adjusting Permission for field: ' + fieldName);
 
-						csvUpdateString += thisObject + ',' + fieldName + ',' + thisProfile + ',' + thisPermission.PermissionsRead + ',' + thisPermission.PermissionsEdit + ',' + canView + ',' + canEdit + ',';
+						Boolean wasReadable = thisPermission.PermissionsRead;
+						Boolean wasEditable = thisPermission.PermissionsEdit;
 
-						if (thisPermission.PermissionsRead != canView) csvUpdateString += 'Read Access ';
+						String whatChanged = '';
 
-						if (thisPermission.PermissionsEdit != canEdit) csvUpdateString += 'Edit Access ';
-
-						csvUpdateString += '\n';
+						// View
+						if (thisPermission.PermissionsRead != canView) {
+							whatChanged += 'Read Access ';
+						}
 
 						thisPermission.PermissionsRead = canView;
-						thisPermission.PermissionsEdit = canEdit;
+
+						// Edit
+						if (!isFormula) {
+							if (thisPermission.PermissionsEdit != canEdit) {
+								whatChanged += 'Edit Access ';
+							}
+
+							thisPermission.PermissionsEdit = canEdit;
+
+						} else {
+							thisPermission.PermissionsEdit = false;
+							whatChanged += 'Formula is ReadOnly ';
+						}
+
+						csvUpdateString += thisObject + csvSep + fieldName + csvSep + fieldType + csvSep + thisProfile + csvSep + wasReadable + csvSep + wasEditable + csvSep + thisPermission.PermissionsRead + csvSep + thisPermission.PermissionsEdit + csvSep + whatChanged;
+						csvUpdateString += '\n';
+
 						updatePermissions.add(thisPermission);
 					}
 				}
@@ -160,13 +186,13 @@ public with sharing class Util_SetFLSForObjectFields {
 
 			if (results[index].isSuccess()) {
 				if (results[index].isCreated()) {
-					upsertResults += thisObj.sObjectType + ',' + thisObj.Field + ',' + thisObj.ParentId + ',' + thisProfileName + ',permission was created\n';
+					upsertResults += thisObj.sObjectType + csvSep + thisObj.Field + csvSep + thisObj.ParentId + csvSep + thisProfileName + csvSep + 'permission was created\n';
 				} else {
-					upsertResults += thisObj.sObjectType + ',' + thisObj.Field + ',' + thisObj.ParentId + ',' + thisProfileName + ',permission was edited\n';
+					upsertResults += thisObj.sObjectType + csvSep + thisObj.Field + csvSep + thisObj.ParentId + csvSep + thisProfileName + csvSep + 'permission was edited\n';
 				}
 			}
 			else {
-				upsertResults += thisObj.sObjectType + ',' + thisObj.Field + ',' + thisObj.ParentId + ',' + thisProfileName + 'ERROR: ' + results[index].getErrors()[0].getMessage() + '\n';
+				upsertResults += thisObj.sObjectType + csvSep + thisObj.Field + csvSep + thisObj.ParentId + csvSep + thisProfileName + csvSep + 'ERROR: ' + results[index].getErrors()[0].getMessage() + '\n';
 			}
 		}
 
@@ -175,7 +201,7 @@ public with sharing class Util_SetFLSForObjectFields {
 		// System.debug('\n\n\n------- Update Results');
 		// System.debug(upsertResults);
 
-		ID jobID = System.enqueueJob(new sendEmailAsync(csvUpdateString, emailRecips, sObjects, profileNames, upsertResults));
+		ID jobID = System.enqueueJob(new sendEmailAsync(csvUpdateString, emailRecips, sObjects, profileNames, upsertResults, doUpdate));
 
 		return csvUpdateString;
 	}
@@ -186,13 +212,15 @@ public with sharing class Util_SetFLSForObjectFields {
 		List<String> sObjects;
 		List<String> profileNames;
 		String upsertResults;
+		Boolean doUpdate;
 
-		sendEmailAsync(String csvUpdateString, List<String> emailRecips, List<String> sObjects, List<String> profileNames, String upsertResults ) {
+		sendEmailAsync(String csvUpdateString, List<String> emailRecips, List<String> sObjects, List<String> profileNames, String upsertResults, Boolean doUpdate) {
 			this.csvUpdateString = csvUpdateString;
 			this.emailRecips = emailRecips;
 			this.sObjects = sObjects;
 			this.profileNames = profileNames;
 			this.upsertResults = upsertResults;
+			this.doUpdate = doUpdate;
 		}
 
 		public void execute(QueueableContext context) {
@@ -200,9 +228,13 @@ public with sharing class Util_SetFLSForObjectFields {
 			emailMessage.setToAddresses(emailRecips);
 			emailMessage.setSubject('Object Security Update Result');
 
-			String emailBody = 'Updated permissions for objects: ' + sObjects + '\n\n';
+			String emailBody = '';
+			if (!doUpdate) {
+				emailBody += '⚠️SIMULATION (no changes are made)⚠️\n\n';
+			}
+			emailBody += 'Updated permissions for objects: ' + sObjects + '\n';
 			emailBody += 'For profiles: ' + profileNames + '\n\n';
-			emailBody += 'See attachemnts for details';
+			emailBody += 'See attachemnts for details.';
 			// emailBody += 'CSV Update Plan:\n\n\n\n';
 			// emailBody += csvUpdateString;
 			// emailBody += '\n\n\n\n';
